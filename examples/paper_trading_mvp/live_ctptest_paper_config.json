@@ -1,0 +1,59 @@
+{
+    "gateway": {
+        "name": "CTPTEST",
+        "connect_file": "connect_ctptest.json"
+    },
+    "universe": [
+        "MA.CZCE",
+        "RM.CZCE",
+        "SA.CZCE"
+    ],
+    "runtime": {
+        "contract_wait_seconds": 30,
+        "selection_window_minutes": 5,
+        "selection_timeout_seconds": 480,
+        "min_ticks_per_symbol": 10,
+        "loop_sleep_seconds": 2,
+        "output_root": ".vntrader/paper_mvp"
+    },
+    "strategy": {
+        "breakout_buffer_ticks": 1,
+        "order_size": 1,
+        "flat_after": "14:55"
+    },
+    "risk": {
+        "max_selected_symbols": 2,
+        "max_position_per_symbol": 1,
+        "max_order_size": 1,
+        "max_trades_per_symbol": 1,
+        "max_holding_minutes": 30,
+        "max_session_realized_loss": 3000,
+        "max_consecutive_losing_trades": 2,
+        "no_new_entry_after": "14:40",
+        "force_flat_on_hard_stop": true,
+        "official_riskmanager": {
+            "active": true,
+            "order_value_limit": 1000000,
+            "active_order_limit": 10,
+            "total_order_limit": 1000,
+            "total_cancel_limit": 500,
+            "total_trade_limit": 200,
+            "contract_order_limit": 100,
+            "contract_cancel_limit": 50,
+            "contract_trade_limit": 20,
+            "duplicate_order_limit": 3
+        }
+    },
+    "recorder": {
+        "enabled": true,
+        "record_tick": true,
+        "record_bar": true,
+        "shrink_to_selected_after_selection": true,
+        "whitelist": []
+    },
+    "paper": {
+        "trade_slippage": 1,
+        "timer_interval": 3,
+        "instant_trade": false
+    }
+}

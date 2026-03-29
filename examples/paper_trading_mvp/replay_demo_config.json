@@ -1,0 +1,17 @@
+{
+    "contracts": [
+        {
+            "vt_symbol": "AP301.CZCE",
+            "csv_file": "D:/fut_data_1min_2023/AP301.csv",
+            "pricetick": 1,
+            "size": 10
+        }
+    ],
+    "selection_bars": 5,
+    "top_n": 1,
+    "breakout_buffer_ticks": 1,
+    "order_size": 1,
+    "flat_after": "14:55",
+    "allow_synthetic_if_missing": true,
+    "output_root": ".vntrader/paper_mvp"
+}
