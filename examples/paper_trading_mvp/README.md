@@ -108,6 +108,11 @@ To start the launcher now but delay the actual run until a target local time, us
 .\scripts\run_parallel_paper_mvp.ps1 -Mode Live -Gateway CTP -WaitUntilLocalTime 08:55
 ```
 
+Timezone note:
+
+- `-WaitUntilLocalTime` always uses the computer's local clock
+- if the machine is currently on US Eastern Daylight Time (`UTC-4`), then Beijing `08:59` maps to local `20:59` on the previous evening
+
 Behavior of delayed launch:
 
 - the script waits until the next occurrence of the specified local time

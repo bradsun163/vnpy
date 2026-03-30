@@ -1,0 +1,16 @@
+Tomorrow SimNow retest commands
+
+Local timezone at time of writing: EDT (UTC-4)
+Tomorrow Beijing 08:59 = local 20:59 on 2026-03-30
+
+1. Official diagnostic before live retest
+$env:PYTHONPATH='C:\Users\bradsun\vnpy-4.3.0-packages;C:\Users\bradsun\vnpy'; & 'C:\Users\bradsun\AppData\Local\Programs\Python\Python312\python.exe' '.\examples\veighna_trader\diagnose_ctp_connect.py' --connect-file 'C:\Users\bradsun\.vntrader\connect_ctp.json' --timeout 15
+
+2. Full live runner now
+.\scripts\run_parallel_paper_mvp.ps1 -Mode Live -Gateway CTP
+
+3. Delayed launch for tomorrow morning open
+.\scripts\run_parallel_paper_mvp.ps1 -Mode Live -Gateway CTP -WaitUntilLocalTime 20:59
+
+4. Delayed launch for tomorrow afternoon session
+.\scripts\run_parallel_paper_mvp.ps1 -Mode Live -Gateway CTP -WaitUntilLocalTime 01:29

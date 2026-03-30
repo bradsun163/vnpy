@@ -4,7 +4,7 @@ import json
 import re
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from logging import INFO
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Type
@@ -27,6 +27,14 @@ from .selection import UniverseSelector
 DEFAULT_OUTPUT_ROOT = Path.home().joinpath(".vntrader", "paper_mvp")
 SYMBOL_PATTERN = re.compile(r"^(?P<root>[A-Za-z]+)(?P<month>\d+)?$")
 
+DAY_SESSION_WINDOWS: List[Tuple[int, int]] = [
+    (9 * 60, 10 * 60 + 15),
+    (10 * 60 + 30, 11 * 60 + 30),
+    (13 * 60 + 30, 15 * 60),
+]
+DEFAULT_NIGHT_SESSION_START_MINUTE: int = 21 * 60
+DEFAULT_NIGHT_SESSION_END_MINUTE: int = 2 * 60 + 30
+
 
 class IsolatedPaperEngine(PaperEngine):
     setting_filename = "paper_mvp_paper_account_setting.json"
@@ -46,6 +54,26 @@ class IsolatedPaperAccountApp(BaseApp):
 def load_plain_json(path: Path) -> dict:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def get_beijing_now() -> datetime:
+    return datetime.now(timezone.utc) + timedelta(hours=8)
+
+
+def minute_of_day(dt: datetime) -> int:
+    return dt.hour * 60 + dt.minute
+
+
+def is_china_futures_trading_window(dt: datetime) -> bool:
+    current_minute: int = minute_of_day(dt)
+
+    if any(start <= current_minute < end for start, end in DAY_SESSION_WINDOWS):
+        return True
+
+    if current_minute >= DEFAULT_NIGHT_SESSION_START_MINUTE:
+        return True
+
+    return current_minute < DEFAULT_NIGHT_SESSION_END_MINUTE
 
 
 def get_gateway_class(gateway_name: str) -> Tuple[Type, str]:
@@ -92,7 +120,7 @@ class LivePaperTradingRunner:
         self.paper_engine = None
         self.official_risk_engine = None
         self.recorder_engine = None
-        self.gateway_name: str = ""
+        self.gateway_class, self.gateway_name = get_gateway_class(self.config["gateway"]["name"])
         self.recorder_symbols: List[str] = []
         self.recorder_started_at: datetime | None = None
         self.recorder_phase: str = "disabled"
@@ -100,6 +128,23 @@ class LivePaperTradingRunner:
         self.selected_symbols: List[str] = []
         self.selection_completed: bool = False
         self.status: str = "created"
+
+    def reset_runtime_state(self) -> None:
+        self.selector = None
+        self.available_symbol_roots = {}
+        self.root_candidate_counts = {}
+        self.event_engine = None
+        self.main_engine = None
+        self.cta_engine = None
+        self.paper_engine = None
+        self.official_risk_engine = None
+        self.recorder_engine = None
+        self.recorder_symbols = []
+        self.recorder_started_at = None
+        self.recorder_phase = "disabled"
+        self.strategy_names = {}
+        self.selected_symbols = []
+        self.selection_completed = False
 
     def parse_universe_specs(self) -> None:
         concrete_specs: List[str] = []
@@ -212,6 +257,121 @@ class LivePaperTradingRunner:
         SETTINGS["log.file"] = True
         SETTINGS["database.name"] = "sqlite"
         SETTINGS["datafeed.name"] = ""
+
+    def load_connect_config(self) -> dict:
+        connect_file: str = self.config["gateway"]["connect_file"]
+
+        if Path(connect_file).is_absolute():
+            return load_plain_json(Path(connect_file))
+        return load_json(connect_file)
+
+    def enrich_simnow_front_candidates(self, base_setting: dict, variants: List[dict]) -> List[dict]:
+        broker_id: str = str(base_setting.get("经纪商代码", "")).strip()
+        app_id: str = str(base_setting.get("产品名称", "")).strip()
+        auth_code: str = str(base_setting.get("授权编码", "")).strip()
+
+        if self.gateway_name != "CTP":
+            return variants
+        if broker_id != "9999":
+            return variants
+        if app_id != "simnow_client_test" or auth_code != "0000000000000000":
+            return variants
+
+        preferred_environment: str = "实盘" if is_china_futures_trading_window(get_beijing_now()) else "测试"
+        alternate_environment: str = "测试" if preferred_environment == "实盘" else "实盘"
+
+        known_pairs: List[tuple[str, str, str]] = [
+            ("180.168.146.187:10202", "180.168.146.187:10212", "simnow_builtin_10202_10212"),
+            ("180.168.146.187:10201", "180.168.146.187:10211", "simnow_builtin_10201_10211"),
+            ("180.168.146.187:10130", "180.168.146.187:10131", "simnow_builtin_10130_10131"),
+            ("182.254.243.31:30001", "182.254.243.31:30011", "simnow_builtin_30001_30011"),
+        ]
+
+        seen_pairs: set[tuple[str, str]] = set()
+        enriched: List[dict] = []
+        for variant in variants:
+            td_address: str = str(variant.get("交易服务器", "")).strip()
+            md_address: str = str(variant.get("行情服务器", "")).strip()
+            pair: tuple[str, str] = (td_address, md_address)
+            if td_address and md_address and pair not in seen_pairs:
+                seen_pairs.add(pair)
+                enriched.append(variant)
+
+        for td_address, md_address, label in known_pairs:
+            pair = (td_address, md_address)
+            if pair in seen_pairs:
+                continue
+
+            variant = dict(base_setting)
+            variant["交易服务器"] = td_address
+            variant["行情服务器"] = md_address
+            variant["__label__"] = label
+            enriched.append(variant)
+            seen_pairs.add(pair)
+
+        expanded: List[dict] = []
+        seen_variants: set[tuple[str, str, str]] = set()
+        for variant in enriched:
+            td_address: str = str(variant.get("交易服务器", "")).strip()
+            md_address: str = str(variant.get("行情服务器", "")).strip()
+            base_label: str = str(variant.get("__label__", "simnow"))
+
+            for environment in (preferred_environment, alternate_environment):
+                key: tuple[str, str, str] = (td_address, md_address, environment)
+                if key in seen_variants:
+                    continue
+
+                expanded_variant: dict = dict(variant)
+                expanded_variant["柜台环境"] = environment
+                expanded_variant["__label__"] = f"{base_label}|env={environment}"
+                expanded.append(expanded_variant)
+                seen_variants.add(key)
+
+        return expanded
+
+    def build_gateway_setting_variants(self) -> List[dict]:
+        gateway_setting: dict = dict(self.gateway_class.default_setting)
+        connect_config: dict = self.load_connect_config()
+        gateway_setting.update(connect_config)
+
+        candidate_rows: List[dict] = []
+        raw_candidates: list = list(connect_config.get("前置组合候选", []))
+        for index, candidate in enumerate(raw_candidates, start=1):
+            if not isinstance(candidate, dict):
+                continue
+
+            td_address: str = str(candidate.get("交易服务器", "")).strip()
+            md_address: str = str(candidate.get("行情服务器", "")).strip()
+            if not td_address or not md_address:
+                continue
+
+            variant: dict = dict(gateway_setting)
+            variant["交易服务器"] = td_address
+            variant["行情服务器"] = md_address
+            if candidate.get("柜台环境"):
+                variant["柜台环境"] = str(candidate.get("柜台环境"))
+            variant["__label__"] = str(candidate.get("名称") or candidate.get("备注") or f"candidate_{index}")
+            candidate_rows.append(variant)
+
+        if not candidate_rows:
+            single_variant: dict = dict(gateway_setting)
+            single_variant["__label__"] = "primary"
+            candidate_rows = [single_variant]
+
+        return self.enrich_simnow_front_candidates(gateway_setting, candidate_rows)
+
+    def clear_gateway_flow_cache(self) -> None:
+        flow_dir: Path = Path.home().joinpath(".vntrader", self.gateway_name.lower())
+        if not flow_dir.exists():
+            return
+
+        removed_count: int = 0
+        for flow_file in flow_dir.glob("*.con"):
+            flow_file.unlink(missing_ok=True)
+            removed_count += 1
+
+        if removed_count:
+            self.reporter.note(f"cleared {removed_count} native flow cache files from {flow_dir}")
 
     def reset_isolated_state(self) -> None:
         for filename in [
@@ -446,14 +606,14 @@ class LivePaperTradingRunner:
         )
 
     def setup(self) -> None:
+        self.reset_runtime_state()
         self.configure_settings()
         self.reset_isolated_state()
 
         self.event_engine = EventEngine()
         self.main_engine = MainEngine(self.event_engine)
 
-        gateway_class, self.gateway_name = get_gateway_class(self.config["gateway"]["name"])
-        self.main_engine.add_gateway(gateway_class)
+        self.main_engine.add_gateway(self.gateway_class)
 
         self.configure_official_risk_manager()
         self.configure_official_recorder_engine()
@@ -476,20 +636,16 @@ class LivePaperTradingRunner:
         self.publish_risk_snapshot()
         self.reporter.note(f"runtime initialized with gateway={self.gateway_name}")
 
-    def load_gateway_setting(self) -> dict:
-        gateway_setting: dict = self.main_engine.get_default_setting(self.gateway_name)
-        connect_file: str = self.config["gateway"]["connect_file"]
+    def connect_gateway(self, setting: dict, attempt_index: int, attempt_total: int) -> None:
+        td_address: str = str(setting.get("交易服务器", "")).strip()
+        md_address: str = str(setting.get("行情服务器", "")).strip()
+        environment: str = str(setting.get("柜台环境", "")).strip() or "实盘"
+        label: str = str(setting.get("__label__", f"attempt_{attempt_index}"))
 
-        if Path(connect_file).is_absolute():
-            gateway_setting.update(load_plain_json(Path(connect_file)))
-        else:
-            gateway_setting.update(load_json(connect_file))
-        return gateway_setting
-
-    def connect_gateway(self) -> None:
-        setting: dict = self.load_gateway_setting()
         self.main_engine.connect(setting, self.gateway_name)
-        self.reporter.note(f"connect invoked for {self.gateway_name}")
+        self.reporter.note(
+            f"connect invoked for {self.gateway_name} attempt {attempt_index}/{attempt_total} [{label}] env={environment} td={td_address} md={md_address}"
+        )
 
     def wait_for_contracts(self) -> List[str]:
         deadline: float = time.time() + int(self.runtime_config["contract_wait_seconds"])
@@ -672,19 +828,39 @@ class LivePaperTradingRunner:
             self.cta_engine.stop_all_strategies()
         if self.main_engine:
             self.main_engine.close()
+        self.event_engine = None
+        self.main_engine = None
+        self.cta_engine = None
+        self.paper_engine = None
+        self.official_risk_engine = None
+        self.recorder_engine = None
 
     def run(self) -> int:
         try:
             self.status = "starting"
             self.reporter.set_status(self.status)
 
-            self.setup()
-            self.connect_gateway()
+            available_symbols: List[str] = []
+            setting_variants: List[dict] = self.build_gateway_setting_variants()
+            self.reporter.note(f"gateway front candidates prepared: {len(setting_variants)}")
 
-            available_symbols: List[str] = self.wait_for_contracts()
+            for attempt_index, setting in enumerate(setting_variants, start=1):
+                self.clear_gateway_flow_cache()
+                self.setup()
+                self.connect_gateway(setting, attempt_index, len(setting_variants))
+
+                available_symbols = self.wait_for_contracts()
+                if available_symbols:
+                    break
+
+                self.reporter.note(
+                    f"attempt {attempt_index}/{len(setting_variants)} did not yield contract metadata within the wait window"
+                )
+                self.close()
+
             if not available_symbols:
                 self.status = "gateway_unavailable"
-                self.reporter.note("no contract information became available within the wait window")
+                self.reporter.note("no contract information became available within the wait window for any configured front")
                 return 1
 
             self.initialize_selector(available_symbols)

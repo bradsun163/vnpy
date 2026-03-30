@@ -1,0 +1,16 @@
+One-click retest commands
+
+Preflight check before any retest
+.\scripts\run_parallel_ctp_preflight.ps1
+
+Immediate one-click retest
+.\scripts\run_parallel_ctp_retest.ps1 -Gateway CTP -DiagnosticTimeout 15
+
+Immediate one-click retest across all official diagnostic candidates
+.\scripts\run_parallel_ctp_retest.ps1 -Gateway CTP -DiagnosticTimeout 15 -AllDiagnosticCandidates
+
+Delayed one-click retest for tomorrow morning open
+.\scripts\run_parallel_ctp_retest.ps1 -Gateway CTP -DiagnosticTimeout 15 -WaitUntilLocalTime 20:59
+
+Delayed one-click retest for tomorrow afternoon session
+.\scripts\run_parallel_ctp_retest.ps1 -Gateway CTP -DiagnosticTimeout 15 -WaitUntilLocalTime 01:29
