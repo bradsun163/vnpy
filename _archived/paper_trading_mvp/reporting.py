@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable
 
 from vnpy.event import Event, EventEngine
-from vnpy.trader.event import EVENT_LOG, EVENT_ORDER, EVENT_POSITION, EVENT_TRADE
+from vnpy.trader.event import EVENT_ACCOUNT, EVENT_LOG, EVENT_ORDER, EVENT_POSITION, EVENT_TRADE
 from vnpy_ctastrategy.base import EVENT_CTA_LOG
 
 
@@ -43,6 +43,7 @@ class PaperTradingReporter:
         self.order_count: int = 0
         self.trade_count: int = 0
         self.latest_positions: Dict[str, dict] = {}
+        self.latest_accounts: Dict[str, dict] = {}
 
         self.summary: dict = {
             "run_name": run_name,
@@ -53,6 +54,8 @@ class PaperTradingReporter:
             "selection_rankings": [],
             "recorder": {},
             "risk": {},
+            "accounts": [],
+            "strategy_states": {},
             "notes": [],
         }
         self.write_summary()
@@ -62,6 +65,7 @@ class PaperTradingReporter:
         event_engine.register(EVENT_CTA_LOG, self.process_log_event)
         event_engine.register(EVENT_RECORDER_LOG, self.process_log_event)
         event_engine.register(EVENT_RECORDER_UPDATE, self.process_recorder_event)
+        event_engine.register(EVENT_ACCOUNT, self.process_account_event)
         event_engine.register(EVENT_ORDER, self.process_order_event)
         event_engine.register(EVENT_TRADE, self.process_trade_event)
         event_engine.register(EVENT_POSITION, self.process_position_event)
@@ -93,6 +97,14 @@ class PaperTradingReporter:
         )
         self.write_summary()
 
+    def record_signal(self, signal_type: str, payload: Dict[str, Any]) -> None:
+        event: dict = {
+            "timestamp": datetime.now(),
+            "type": signal_type,
+        }
+        event.update(_jsonable(payload))
+        self.append_jsonl("signals.jsonl", event)
+
     def set_status(self, status: str) -> None:
         self.summary["status"] = status
         self.write_summary()
@@ -109,6 +121,13 @@ class PaperTradingReporter:
         current: dict = dict(self.summary.get("recorder", {}))
         current.update(_jsonable(snapshot))
         self.summary["recorder"] = current
+        self.write_summary()
+
+    def set_strategy_snapshot(self, snapshot: dict, append_history: bool = False) -> None:
+        payload: dict = _jsonable(snapshot)
+        self.summary["strategy_states"] = payload
+        if append_history:
+            self.append_jsonl("strategy_states.jsonl", payload)
         self.write_summary()
 
     def record_risk_event(self, message: str, payload: Dict[str, Any] | None = None) -> None:
@@ -152,6 +171,14 @@ class PaperTradingReporter:
         self.trade_count += 1
         self.summary["trade_count"] = self.trade_count
         self.append_jsonl("trades.jsonl", {"timestamp": datetime.now(), "data": event.data})
+        self.write_summary()
+
+    def process_account_event(self, event: Event) -> None:
+        data: dict = _jsonable(event.data)
+        vt_accountid: str = data.get("vt_accountid", f"{data.get('gateway_name', 'UNKNOWN')}.{data.get('accountid', 'UNKNOWN')}")
+        self.latest_accounts[vt_accountid] = data
+        self.append_jsonl("accounts.jsonl", {"timestamp": datetime.now(), "data": event.data})
+        self.summary["accounts"] = list(self.latest_accounts.values())
         self.write_summary()
 
     def process_position_event(self, event: Event) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import time
@@ -12,7 +13,7 @@ from typing import Any, Dict, List, Tuple, Type
 from vnpy.event import Event, EventEngine
 from vnpy.trader.app import BaseApp
 from vnpy.trader.engine import MainEngine
-from vnpy.trader.event import EVENT_POSITION, EVENT_TICK, EVENT_TRADE
+from vnpy.trader.event import EVENT_ACCOUNT, EVENT_POSITION, EVENT_TICK, EVENT_TRADE
 from vnpy.trader.object import PositionData, TickData, TradeData
 from vnpy.trader.setting import SETTINGS
 from vnpy.trader.utility import get_file_path, load_json, save_json
@@ -136,6 +137,7 @@ class LivePaperTradingRunner:
         self.selection_completed: bool = False
         self.status: str = "created"
         self.last_heartbeat_write: datetime | None = None
+        self.last_strategy_signals: Dict[str, str] = {}
 
     def reset_runtime_state(self) -> None:
         self.selector = None
@@ -153,6 +155,7 @@ class LivePaperTradingRunner:
         self.strategy_names = {}
         self.selected_symbols = []
         self.selection_completed = False
+        self.last_strategy_signals = {}
 
     def parse_universe_specs(self) -> None:
         concrete_specs: List[str] = []
@@ -644,6 +647,7 @@ class LivePaperTradingRunner:
         self.cta_engine.load_strategy_class_from_module("paper_trading_mvp.opening_range_strategy")
 
         self.reporter.attach(self.event_engine)
+        self.event_engine.register(EVENT_ACCOUNT, self.process_account_event)
         self.event_engine.register(EVENT_TICK, self.process_tick_event)
         self.event_engine.register(EVENT_TRADE, self.process_trade_event)
         self.event_engine.register(EVENT_POSITION, self.process_position_event)
@@ -745,11 +749,15 @@ class LivePaperTradingRunner:
         trade: TradeData = event.data
         self.record_risk_messages(self.risk_controller.on_trade(trade))
         self.apply_risk_controls(normalize_timestamp(trade.datetime))
+        self.publish_strategy_snapshot(normalize_timestamp(trade.datetime), force=True)
 
     def process_position_event(self, event: Event) -> None:
         position: PositionData = event.data
         self.risk_controller.sync_position(position)
         self.publish_risk_snapshot()
+
+    def process_account_event(self, event: Event) -> None:
+        self.publish_strategy_snapshot(get_beijing_now())
 
     def process_official_risk_event(self, event: Event) -> None:
         message: str = str(event.data)
@@ -786,6 +794,76 @@ class LivePaperTradingRunner:
 
         self.publish_risk_snapshot()
 
+    def collect_strategy_snapshots(self, now: datetime) -> List[dict]:
+        if not self.cta_engine:
+            return []
+
+        snapshots: List[dict] = []
+        for vt_symbol, strategy_name in self.strategy_names.items():
+            strategy = self.cta_engine.strategies.get(strategy_name)
+            if not strategy:
+                continue
+
+            parameters: Dict[str, Any] = {}
+            for name in getattr(strategy, "parameters", []):
+                parameters[name] = getattr(strategy, name, None)
+
+            variables: Dict[str, Any] = {}
+            for name in getattr(strategy, "variables", []):
+                variables[name] = getattr(strategy, name, None)
+            variables["pos"] = getattr(strategy, "pos", 0)
+
+            snapshots.append(
+                {
+                    "timestamp": datetime.now(),
+                    "beijing_time": now,
+                    "vt_symbol": vt_symbol,
+                    "strategy_name": strategy_name,
+                    "selected": vt_symbol in self.selected_symbols,
+                    "entry_allowed": vt_symbol in self.selected_symbols
+                    and self.risk_controller.symbol_entry_allowed(vt_symbol, now),
+                    "force_exit_requested": bool(getattr(strategy, "force_exit_requested", False)),
+                    "risk_stop_active": bool(getattr(strategy, "risk_stop_active", False)),
+                    "parameters": parameters,
+                    "variables": variables,
+                }
+            )
+
+        return snapshots
+
+    def publish_strategy_snapshot(self, now: datetime, force: bool = False) -> None:
+        snapshots: List[dict] = self.collect_strategy_snapshots(normalize_timestamp(now))
+        if not snapshots:
+            return
+
+        self.reporter.set_strategy_snapshot(
+            {
+                "timestamp": datetime.now(),
+                "beijing_time": normalize_timestamp(now),
+                "strategies": snapshots,
+            },
+            append_history=force,
+        )
+
+        for snapshot in snapshots:
+            vt_symbol: str = snapshot["vt_symbol"]
+            current_signal: str = str(snapshot["variables"].get("last_signal") or "")
+            previous_signal: str = self.last_strategy_signals.get(vt_symbol, "")
+            if current_signal and current_signal != previous_signal:
+                if previous_signal or current_signal != "IDLE":
+                    self.reporter.record_signal(
+                        "strategy_signal",
+                        {
+                            "vt_symbol": vt_symbol,
+                            "strategy_name": snapshot["strategy_name"],
+                            "signal": current_signal,
+                            "selected": snapshot["selected"],
+                            "entry_allowed": snapshot["entry_allowed"],
+                            "force_exit_requested": snapshot["force_exit_requested"],
+                        },
+                    )
+                self.last_strategy_signals[vt_symbol] = current_signal
+
     def emit_runtime_heartbeat(self, now: datetime, force: bool = False) -> None:
         now = normalize_timestamp(now)
         if not force and self.last_heartbeat_write:
@@ -798,10 +876,14 @@ class LivePaperTradingRunner:
                 "local_time": datetime.now().isoformat(),
                 "beijing_time": now.isoformat(),
                 "status": self.status,
+                "pid": os.getpid(),
+                "gateway": self.gateway_name,
+                "config_path": str(self.config_path),
                 "selection_completed": self.selection_completed,
                 "selected_symbols": list(self.selected_symbols),
             }
         )
+        self.publish_strategy_snapshot(now, force=True)
         self.last_heartbeat_write = now
 
     def complete_selection(self) -> None:
