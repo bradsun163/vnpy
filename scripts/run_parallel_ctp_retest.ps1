@@ -115,8 +115,6 @@ if ($AllDiagnosticCandidates) {
     $diagnosticArgs += "--all-candidates"
 }
 
-$launcherArgs = @("-Mode", "Live", "-Gateway", $Gateway)
-
 $logName = "retest_{0}_{1}.log" -f $Gateway.ToLower(), (Get-Date -Format "yyyyMMdd_HHmmss")
 $logPath = Join-Path $launcherLogDir $logName
 
@@ -149,7 +147,7 @@ try {
     }
 
     Write-Host "Diagnostic passed. Starting live runner..."
-    & "$repoRoot\scripts\run_parallel_paper_mvp.ps1" @launcherArgs
+    & "$repoRoot\scripts\run_parallel_paper_mvp.ps1" -Mode Live -Gateway $Gateway
     return $LASTEXITCODE
 }
 finally {

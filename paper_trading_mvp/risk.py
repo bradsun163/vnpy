@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 from typing import Dict, List
 
 from vnpy.trader.constant import Direction
@@ -10,6 +10,17 @@ from vnpy.trader.object import PositionData, TradeData
 
 def parse_clock(value: str) -> time:
     return datetime.strptime(value, "%H:%M").time()
+
+
+def get_beijing_now() -> datetime:
+    return (datetime.now(timezone.utc) + timedelta(hours=8)).replace(tzinfo=None)
+
+
+def normalize_timestamp(dt: datetime | None) -> datetime:
+    current: datetime = dt or get_beijing_now()
+    if current.tzinfo is not None:
+        return current.replace(tzinfo=None)
+    return current
 
 
 @dataclass
@@ -70,7 +81,8 @@ class SessionRiskController:
             state.avg_price = float(position.price)
     def on_trade(self, trade: TradeData) -> List[str]:
         state: SymbolRiskState = self.get_symbol_state(trade.vt_symbol)
-        state.last_trade_time = trade.datetime
+        trade_dt: datetime = normalize_timestamp(trade.datetime)
+        state.last_trade_time = trade_dt
 
         signed_volume: float = float(trade.volume)
         if trade.direction == Direction.SHORT:
@@ -90,7 +102,7 @@ class SessionRiskController:
                 ) / total_volume
             state.net_position = new_position
             if previous_position == 0 and new_position != 0:
-                state.entry_time = trade.datetime
+                state.entry_time = trade_dt
                 state.entry_count += 1
                 if state.entry_count >= self.max_trades_per_symbol > 0:
                     message = f"{trade.vt_symbol} reached max_trades_per_symbol={self.max_trades_per_symbol}"
@@ -118,10 +130,10 @@ class SessionRiskController:
         else:
             state.avg_price = float(trade.price)
             if previous_position * new_position < 0:
-                state.entry_time = trade.datetime
+                state.entry_time = trade_dt
                 state.entry_count += 1
 
-        messages.extend(self.evaluate(trade.datetime or datetime.now()))
+            messages.extend(self.evaluate(trade_dt))
         return messages
 
     def evaluate(self, now: datetime) -> List[str]:

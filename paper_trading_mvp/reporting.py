@@ -48,6 +48,7 @@ class PaperTradingReporter:
             "run_name": run_name,
             "created_at": datetime.now().isoformat(),
             "status": "created",
+            "heartbeat": {},
             "selected_symbols": [],
             "selection_rankings": [],
             "recorder": {},
@@ -94,6 +95,10 @@ class PaperTradingReporter:
 
     def set_status(self, status: str) -> None:
         self.summary["status"] = status
+        self.write_summary()
+
+    def set_heartbeat(self, payload: dict) -> None:
+        self.summary["heartbeat"] = _jsonable(payload)
         self.write_summary()
 
     def set_risk_snapshot(self, snapshot: dict) -> None:
@@ -159,8 +164,10 @@ class PaperTradingReporter:
 
     def write_summary(self) -> None:
         path: Path = self.output_dir.joinpath("session_summary.json")
-        with path.open("w", encoding="utf-8") as handle:
+        temp_path: Path = self.output_dir.joinpath("session_summary.json.tmp")
+        with temp_path.open("w", encoding="utf-8") as handle:
             json.dump(_jsonable(self.summary), handle, ensure_ascii=False, indent=4)
+        temp_path.replace(path)
 
     def close(self, extra_summary: Dict[str, Any] | None = None) -> None:
         if extra_summary:

@@ -1,10 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Iterable, List, Optional
 
 from vnpy.trader.object import TickData
+
+
+def get_beijing_now() -> datetime:
+    return (datetime.now(timezone.utc) + timedelta(hours=8)).replace(tzinfo=None)
+
+
+def normalize_timestamp(dt: datetime | None) -> datetime:
+    current: datetime = dt or get_beijing_now()
+    if current.tzinfo is not None:
+        return current.replace(tzinfo=None)
+    return current
 
 
 @dataclass
@@ -24,7 +35,7 @@ class SymbolSelectionStats:
         if not tick.last_price:
             return
 
-        tick_dt: datetime = tick.datetime or datetime.now()
+        tick_dt: datetime = normalize_timestamp(tick.datetime)
 
         if not self.tick_count:
             self.first_tick_time = tick_dt
@@ -97,7 +108,7 @@ class UniverseSelector:
 
         stats.update(tick)
 
-        tick_dt: datetime = tick.datetime or datetime.now()
+        tick_dt: datetime = normalize_timestamp(tick.datetime)
         if not self.window_start:
             self.window_start = tick_dt
 
@@ -105,7 +116,7 @@ class UniverseSelector:
         if not self.window_start:
             return False
 
-        current: datetime = now or datetime.now()
+        current: datetime = normalize_timestamp(now)
         return current >= self.window_start + timedelta(minutes=self.selection_minutes)
 
     def rankings(self) -> List[dict]:

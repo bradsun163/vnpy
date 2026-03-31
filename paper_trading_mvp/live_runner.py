@@ -57,7 +57,14 @@ def load_plain_json(path: Path) -> dict:
 
 
 def get_beijing_now() -> datetime:
-    return datetime.now(timezone.utc) + timedelta(hours=8)
+    return (datetime.now(timezone.utc) + timedelta(hours=8)).replace(tzinfo=None)
+
+
+def normalize_timestamp(dt: datetime | None) -> datetime:
+    current: datetime = dt or get_beijing_now()
+    if current.tzinfo is not None:
+        return current.replace(tzinfo=None)
+    return current
 
 
 def minute_of_day(dt: datetime) -> int:
@@ -128,6 +135,7 @@ class LivePaperTradingRunner:
         self.selected_symbols: List[str] = []
         self.selection_completed: bool = False
         self.status: str = "created"
+        self.last_heartbeat_write: datetime | None = None
 
     def reset_runtime_state(self) -> None:
         self.selector = None
@@ -366,12 +374,18 @@ class LivePaperTradingRunner:
             return
 
         removed_count: int = 0
+        skipped_count: int = 0
         for flow_file in flow_dir.glob("*.con"):
-            flow_file.unlink(missing_ok=True)
-            removed_count += 1
+            try:
+                flow_file.unlink(missing_ok=True)
+                removed_count += 1
+            except PermissionError:
+                skipped_count += 1
 
         if removed_count:
             self.reporter.note(f"cleared {removed_count} native flow cache files from {flow_dir}")
+        if skipped_count:
+            self.reporter.note(f"skipped {skipped_count} locked native flow cache files under {flow_dir}")
 
     def reset_isolated_state(self) -> None:
         for filename in [
@@ -713,7 +727,7 @@ class LivePaperTradingRunner:
         for future in futures.values():
             future.result(timeout=60)
         self.cta_engine.start_all_strategies()
-        self.apply_risk_controls(datetime.now())
+        self.apply_risk_controls(get_beijing_now())
 
         self.reporter.note(f"strategies installed for {available_symbols}")
 
@@ -730,7 +744,7 @@ class LivePaperTradingRunner:
     def process_trade_event(self, event: Event) -> None:
         trade: TradeData = event.data
         self.record_risk_messages(self.risk_controller.on_trade(trade))
-        self.apply_risk_controls(trade.datetime or datetime.now())
+        self.apply_risk_controls(normalize_timestamp(trade.datetime))
 
     def process_position_event(self, event: Event) -> None:
         position: PositionData = event.data
@@ -752,6 +766,7 @@ class LivePaperTradingRunner:
             )
 
     def apply_risk_controls(self, now: datetime) -> None:
+        now = normalize_timestamp(now)
         self.record_risk_messages(self.risk_controller.evaluate(now))
 
         if not self.cta_engine:
@@ -771,6 +786,24 @@ class LivePaperTradingRunner:
 
         self.publish_risk_snapshot()
 
+    def emit_runtime_heartbeat(self, now: datetime, force: bool = False) -> None:
+        now = normalize_timestamp(now)
+        if not force and self.last_heartbeat_write:
+            elapsed: float = (now - self.last_heartbeat_write).total_seconds()
+            if elapsed < 10:
+                return
+
+        self.reporter.set_heartbeat(
+            {
+                "local_time": datetime.now().isoformat(),
+                "beijing_time": now.isoformat(),
+                "status": self.status,
+                "selection_completed": self.selection_completed,
+                "selected_symbols": list(self.selected_symbols),
+            }
+        )
+        self.last_heartbeat_write = now
+
     def complete_selection(self) -> None:
         if self.selection_completed:
             return
@@ -787,6 +820,7 @@ class LivePaperTradingRunner:
 
         if not selected_symbols:
             self.status = "selection_failed"
+            self.reporter.set_status(self.status)
             self.shrink_recorder_recordings([])
             self.reporter.note("selection completed but no eligible symbol satisfied the minimum tick threshold")
             self.selection_completed = True
@@ -794,8 +828,9 @@ class LivePaperTradingRunner:
 
         self.selection_completed = True
         self.status = "running"
+        self.reporter.set_status(self.status)
         self.shrink_recorder_recordings(selected_symbols)
-        self.apply_risk_controls(datetime.now())
+        self.apply_risk_controls(get_beijing_now())
         self.reporter.note(f"trade enabled for {selected_symbols}")
 
     def run_loop(self) -> None:
@@ -804,11 +839,12 @@ class LivePaperTradingRunner:
         selection_timeout_seconds: int = int(self.runtime_config["selection_timeout_seconds"])
 
         while True:
-            now: datetime = datetime.now()
+            now: datetime = get_beijing_now()
+            self.emit_runtime_heartbeat(now)
             self.apply_risk_controls(now)
 
             if not self.selection_completed and self.selector.window_start:
-                elapsed: float = (now - self.selector.window_start).total_seconds()
+                elapsed: float = (now - normalize_timestamp(self.selector.window_start)).total_seconds()
                 if elapsed >= selection_timeout_seconds:
                     self.complete_selection()
 
@@ -839,6 +875,7 @@ class LivePaperTradingRunner:
         try:
             self.status = "starting"
             self.reporter.set_status(self.status)
+            self.emit_runtime_heartbeat(get_beijing_now(), force=True)
 
             available_symbols: List[str] = []
             setting_variants: List[dict] = self.build_gateway_setting_variants()

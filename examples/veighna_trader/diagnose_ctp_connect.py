@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Thread
 from typing import Any
 
 from vnpy.event import Event, EventEngine
@@ -144,8 +147,11 @@ def clear_flow_cache() -> int:
 
     removed_count: int = 0
     for flow_file in flow_dir.glob("*.con"):
-        flow_file.unlink(missing_ok=True)
-        removed_count += 1
+        try:
+            flow_file.unlink(missing_ok=True)
+            removed_count += 1
+        except PermissionError:
+            continue
     return removed_count
 
 
@@ -153,6 +159,25 @@ def append_jsonl(output_dir: Path, filename: str, payload: dict[str, Any]) -> No
     path = output_dir.joinpath(filename)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(make_jsonable(payload), ensure_ascii=False) + "\n")
+
+
+def close_main_engine(main_engine: MainEngine, attempt_summary: dict[str, Any], timeout_seconds: int = 5) -> None:
+    errors: list[str] = []
+
+    def do_close() -> None:
+        try:
+            main_engine.close()
+        except Exception as exc:  # pragma: no cover - defensive cleanup path
+            errors.append(str(exc))
+
+    close_thread = Thread(target=do_close, daemon=True)
+    close_thread.start()
+    close_thread.join(timeout_seconds)
+
+    if errors:
+        attempt_summary["close_error"] = errors[0]
+    elif close_thread.is_alive():
+        attempt_summary["close_timeout_seconds"] = timeout_seconds
 
 
 def run_attempt(
@@ -235,7 +260,7 @@ def run_attempt(
         )
         attempt_summary["closed_at"] = datetime.now().isoformat()
     finally:
-        main_engine.close()
+        close_main_engine(main_engine, attempt_summary)
 
     return attempt_summary
 
@@ -296,4 +321,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    exit_code = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(exit_code)
